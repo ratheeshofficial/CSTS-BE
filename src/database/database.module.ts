@@ -3,11 +3,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { join } from 'path';
 
+const isTest = process.env.NODE_ENV === 'test';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '.env',
+      envFilePath: isTest ? ['.env.test', '.env'] : '.env',
     }),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
@@ -21,7 +23,7 @@ import { join } from 'path';
         autoLoadEntities: true,
         synchronize: false,
         migrations: [join(__dirname, 'migrations', '*.{ts,js}')],
-        migrationsRun: false,
+        migrationsRun: isTest,
       }),
     }),
   ],
