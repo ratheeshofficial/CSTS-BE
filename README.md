@@ -42,7 +42,14 @@ NestJS API for a customer support ticket system.
    npm install
    ```
 
-4. Start the API in watch mode:
+4. Run migrations, then seed demo users, tickets, and comments:
+
+   ```bash
+   npm run migration:run
+   npm run seed
+   ```
+
+5. Start the API in watch mode:
 
    ```bash
    npm run start:dev
@@ -56,6 +63,23 @@ NestJS API for a customer support ticket system.
 | Swagger UI | [http://localhost:3000/api/docs](http://localhost:3000/api/docs) |
 
 The global API prefix is `/api`.
+
+## Seed data
+
+`npm run seed` is idempotent: if `admin@csts.local` already exists it skips. Use `npm run seed:reset` to truncate users, tickets, and comments, reset the ticket-number sequence, and insert again.
+
+Seeding is refused when `NODE_ENV=production` unless you also pass `--force` (`npm run seed -- --force`).
+
+All seed accounts use the password `Password123!`.
+
+| Email | Role | Notes |
+| --- | --- | --- |
+| `admin@csts.local` | ADMIN | Staff login; can delete tickets |
+| `agent1@csts.local` | SUPPORT_AGENT | Primary assignee |
+| `agent2@csts.local` | SUPPORT_AGENT | Second assignee |
+| `alice@example.com` | CUSTOMER | Several tickets |
+| `bob@example.com` | CUSTOMER | |
+| `carol@example.com` | CUSTOMER | Inactive (`isActive: false`) |
 
 ## Project structure
 
@@ -71,7 +95,8 @@ src/
 └── database/
     ├── database.module.ts
     ├── data-source.ts
-    └── migrations/
+    ├── migrations/
+    └── seeds/
 ```
 
 Auth, users, tickets, and comments are not implemented yet.
@@ -89,6 +114,8 @@ Auth, users, tickets, and comments are not implemented yet.
 | `npm run migration:generate -- src/database/migrations/Name` | Generate a migration |
 | `npm run migration:run` | Run pending migrations |
 | `npm run migration:revert` | Revert the last migration |
+| `npm run seed` | Insert demo users, tickets, and comments (skips if already seeded) |
+| `npm run seed:reset` | Truncate users/tickets/comments and reseed |
 
 ## Docker
 
