@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBadGatewayResponse,
   ApiBearerAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -31,6 +32,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateTicketDto } from './dto/create-ticket.dto';
 import { QueryTicketsDto } from './dto/query-tickets.dto';
+import { SuggestClassificationDto } from './dto/suggest-classification.dto';
 import {
   PaginatedTicketsDto,
   TicketResponseDto,
@@ -71,6 +73,25 @@ export class TicketsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.ticketsService.findOne(user, id);
+  }
+
+  @Post(':id/suggest-classification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Suggest category and priority for a ticket (not saved)',
+  })
+  @ApiOkResponse({ type: SuggestClassificationDto })
+  @ApiNotFoundResponse({ description: 'Ticket not found' })
+  @ApiForbiddenResponse({ description: 'Insufficient permissions' })
+  @ApiBadGatewayResponse({
+    description:
+      'Classification service is unavailable or returned invalid JSON',
+  })
+  suggestClassification(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.ticketsService.suggestClassification(user, id);
   }
 
   @Put(':id')

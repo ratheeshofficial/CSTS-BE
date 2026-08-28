@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   NotFoundException,
@@ -6,6 +7,8 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { TICKET_CLASSIFIER } from '../ai/ticket-classifier';
+import type { TicketClassifier } from '../ai/ticket-classifier';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -28,6 +31,7 @@ describe('TicketsService', () => {
   };
   let usersService: jest.Mocked<Pick<UsersService, 'findById'>>;
   let dataSource: { query: jest.Mock };
+  let ticketClassifier: jest.Mocked<Pick<TicketClassifier, 'classify'>>;
   let queryBuilder: {
     leftJoinAndSelect: jest.Mock;
     orderBy: jest.Mock;
@@ -109,6 +113,9 @@ describe('TicketsService', () => {
     };
     usersService = { findById: jest.fn() };
     dataSource = { query: jest.fn() };
+    ticketClassifier = {
+      classify: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -116,6 +123,7 @@ describe('TicketsService', () => {
         { provide: getRepositoryToken(Ticket), useValue: ticketsRepository },
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
+        { provide: TICKET_CLASSIFIER, useValue: ticketClassifier },
       ],
     }).compile();
 
@@ -266,6 +274,73 @@ describe('TicketsService', () => {
     });
   });
 
+  describe('suggestClassification', () => {
+    const suggestion = {
+      category: TicketCategory.PAYMENT,
+      priority: TicketPriority.HIGH,
+      reason: 'Customer was charged twice.',
+    };
+
+    it('returns a suggestion without saving the ticket', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketClassifier.classify.mockResolvedValue(suggestion);
+
+      const result = await service.suggestClassification(agentUser, ticket.id);
+
+      expect(ticketClassifier.classify).toHaveBeenCalledWith({
+        title: ticket.title,
+        description: ticket.description,
+      });
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
+      expect(result).toEqual(suggestion);
+    });
+
+    it('throws NotFoundException when the ticket is missing', async () => {
+      ticketsRepository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.suggestClassification(agentUser, 'missing'),
+      ).rejects.toThrow(NotFoundException);
+      expect(ticketClassifier.classify).not.toHaveBeenCalled();
+    });
+
+    it('throws ForbiddenException when a customer classifies another customer ticket', async () => {
+      ticketsRepository.findOne.mockResolvedValue({
+        ...ticket,
+        customerId: 'other-customer',
+      });
+
+      await expect(
+        service.suggestClassification(customerUser, ticket.id),
+      ).rejects.toThrow(ForbiddenException);
+      expect(ticketClassifier.classify).not.toHaveBeenCalled();
+    });
+
+    it('maps classifier failures to BadGatewayException', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketClassifier.classify.mockRejectedValue(new Error('network down'));
+
+      await expect(
+        service.suggestClassification(agentUser, ticket.id),
+      ).rejects.toThrow(BadGatewayException);
+      await expect(
+        service.suggestClassification(agentUser, ticket.id),
+      ).rejects.toThrow('Classification service is unavailable');
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('rethrows BadGatewayException from the classifier', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketClassifier.classify.mockRejectedValue(
+        new BadGatewayException('Classification service returned invalid JSON'),
+      );
+
+      await expect(
+        service.suggestClassification(agentUser, ticket.id),
+      ).rejects.toThrow('Classification service returned invalid JSON');
+    });
+  });
+
   describe('update', () => {
     it('lets a customer replace title and description', async () => {
       ticketsRepository.findOne.mockResolvedValue({ ...ticket });
@@ -351,7 +426,9 @@ describe('TicketsService', () => {
     it('throws NotFoundException when the ticket is missing', async () => {
       ticketsRepository.findOne.mockResolvedValue(null);
 
-      await expect(service.remove('missing')).rejects.toThrow('Ticket not found');
+      await expect(service.remove('missing')).rejects.toThrow(
+        'Ticket not found',
+      );
     });
   });
 });

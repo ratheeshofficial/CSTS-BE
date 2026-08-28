@@ -1,5 +1,6 @@
 import {
   ArgumentsHost,
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -72,6 +73,18 @@ describe('HttpExceptionFilter', () => {
         statusCode: 409,
         message: 'Email is already registered',
         error: 'Conflict',
+      }),
+    );
+
+    filter.catch(
+      new BadGatewayException('Classification service is unavailable'),
+      host,
+    );
+    expect(json).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        statusCode: 502,
+        message: 'Classification service is unavailable',
+        error: 'Bad Gateway',
       }),
     );
   });

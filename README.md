@@ -27,6 +27,8 @@ NestJS API for a customer support ticket system.
    | `DB_PASSWORD` | `postgres` |
    | `DB_NAME` | `csts` |
    | `DB_SYNC` | `true` |
+   | `GEMINI_API_KEY` | (required for ticket classification suggestions) |
+   | `GEMINI_MODEL` | `gemini-3.6-flash` |
 
    `DB_SYNC=true` is for this empty bootstrap only. Set it to `false` in production and use TypeORM migrations instead.
 

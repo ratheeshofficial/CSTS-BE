@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AiModule } from '../ai/ai.module';
 import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { Ticket } from './entities/ticket.entity';
@@ -7,7 +8,12 @@ import { TicketsController } from './tickets.controller';
 import { TicketsService } from './tickets.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Ticket]), AuthModule, UsersModule],
+  imports: [
+    TypeOrmModule.forFeature([Ticket]),
+    AuthModule,
+    UsersModule,
+    AiModule,
+  ],
   controllers: [TicketsController],
   providers: [TicketsService],
   exports: [TicketsService],

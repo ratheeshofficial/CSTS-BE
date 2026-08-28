@@ -1,11 +1,19 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import {
+  TICKET_CLASSIFIER,
+  type TicketClassificationResult,
+  type TicketClassifier,
+} from '../ai/ticket-classifier';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -42,6 +50,8 @@ export class TicketsService {
     private readonly ticketsRepository: Repository<Ticket>,
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
+    @Inject(TICKET_CLASSIFIER)
+    private readonly ticketClassifier: TicketClassifier,
   ) {}
 
   async create(user: AuthUser, dto: CreateTicketDto) {
@@ -123,6 +133,25 @@ export class TicketsService {
     const ticket = await this.findOneOrFail(id);
     this.assertCustomerAccess(user, ticket);
     return ticket;
+  }
+
+  async suggestClassification(
+    user: AuthUser,
+    id: string,
+  ): Promise<TicketClassificationResult> {
+    const ticket = await this.findOne(user, id);
+
+    try {
+      return await this.ticketClassifier.classify({
+        title: ticket.title,
+        description: ticket.description,
+      });
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new BadGatewayException('Classification service is unavailable');
+    }
   }
 
   async update(
