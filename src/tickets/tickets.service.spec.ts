@@ -9,6 +9,8 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { TICKET_CLASSIFIER } from '../ai/ticket-classifier';
 import type { TicketClassifier } from '../ai/ticket-classifier';
+import { TICKET_EMBEDDER } from '../ai/ticket-embedder';
+import type { TicketEmbedder } from '../ai/ticket-embedder';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -25,6 +27,7 @@ describe('TicketsService', () => {
   let ticketsRepository: {
     create: jest.Mock;
     save: jest.Mock;
+    find: jest.Mock;
     findOne: jest.Mock;
     remove: jest.Mock;
     createQueryBuilder: jest.Mock;
@@ -32,6 +35,7 @@ describe('TicketsService', () => {
   let usersService: jest.Mocked<Pick<UsersService, 'findById'>>;
   let dataSource: { query: jest.Mock };
   let ticketClassifier: jest.Mocked<Pick<TicketClassifier, 'classify'>>;
+  let ticketEmbedder: jest.Mocked<Pick<TicketEmbedder, 'embed'>>;
   let queryBuilder: {
     leftJoinAndSelect: jest.Mock;
     orderBy: jest.Mock;
@@ -39,6 +43,7 @@ describe('TicketsService', () => {
     skip: jest.Mock;
     take: jest.Mock;
     getManyAndCount: jest.Mock;
+    getMany: jest.Mock;
   };
 
   const customerUser: AuthUser = {
@@ -102,11 +107,13 @@ describe('TicketsService', () => {
       skip: jest.fn().mockReturnThis(),
       take: jest.fn().mockReturnThis(),
       getManyAndCount: jest.fn().mockResolvedValue([[ticket], 1]),
+      getMany: jest.fn().mockResolvedValue([]),
     };
 
     ticketsRepository = {
       create: jest.fn(),
       save: jest.fn(),
+      find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn(),
       remove: jest.fn(),
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
@@ -116,6 +123,9 @@ describe('TicketsService', () => {
     ticketClassifier = {
       classify: jest.fn(),
     };
+    ticketEmbedder = {
+      embed: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -124,6 +134,7 @@ describe('TicketsService', () => {
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
         { provide: TICKET_CLASSIFIER, useValue: ticketClassifier },
+        { provide: TICKET_EMBEDDER, useValue: ticketEmbedder },
       ],
     }).compile();
 
@@ -338,6 +349,116 @@ describe('TicketsService', () => {
       await expect(
         service.suggestClassification(agentUser, ticket.id),
       ).rejects.toThrow('Classification service returned invalid JSON');
+    });
+  });
+
+  describe('findSimilar', () => {
+    const peerHigh: Ticket = {
+      ...ticket,
+      id: 'ticket-2',
+      ticketNumber: 'TCK-1002',
+      title: 'Double billed',
+      description: 'Two charges on my card',
+    };
+
+    const peerLow: Ticket = {
+      ...ticket,
+      id: 'ticket-3',
+      ticketNumber: 'TCK-1003',
+      title: 'App crash',
+      description: 'The app closes on login',
+      category: TicketCategory.TECHNICAL,
+    };
+
+    it('ranks peers by cosine similarity without saving', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([peerLow, peerHigh]);
+      ticketEmbedder.embed.mockResolvedValue([
+        [1, 0],
+        [0, 1],
+        [1, 0],
+      ]);
+
+      const result = await service.findSimilar(agentUser, ticket.id, 5);
+
+      expect(ticketsRepository.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: { createdAt: 'DESC' },
+          take: 50,
+        }),
+      );
+      expect(ticketEmbedder.embed).toHaveBeenCalledWith([
+        'Payment failed\nCharged twice',
+        'App crash\nThe app closes on login',
+        'Double billed\nTwo charges on my card',
+      ]);
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
+      expect(result.data.map((item) => item.id)).toEqual([
+        peerHigh.id,
+        peerLow.id,
+      ]);
+      expect(result.data[0].score).toBe(1);
+      expect(result.data[1].score).toBe(0);
+    });
+
+    it('returns an empty list and skips embedding when there are no peers', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([]);
+
+      await expect(service.findSimilar(agentUser, ticket.id)).resolves.toEqual({
+        data: [],
+      });
+      expect(ticketEmbedder.embed).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the ticket is missing', async () => {
+      ticketsRepository.findOne.mockResolvedValue(null);
+
+      await expect(service.findSimilar(agentUser, 'missing')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(ticketEmbedder.embed).not.toHaveBeenCalled();
+    });
+
+    it('throws ForbiddenException when a customer reads another customer ticket', async () => {
+      ticketsRepository.findOne.mockResolvedValue({
+        ...ticket,
+        customerId: 'other-customer',
+      });
+
+      await expect(
+        service.findSimilar(customerUser, ticket.id),
+      ).rejects.toThrow(ForbiddenException);
+      expect(ticketEmbedder.embed).not.toHaveBeenCalled();
+    });
+
+    it('scopes customer peer search to their own tickets', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([]);
+
+      await service.findSimilar(customerUser, ticket.id);
+
+      expect(ticketsRepository.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            customerId: customerUser.id,
+          }),
+        }),
+      );
+    });
+
+    it('maps embedder failures to BadGatewayException', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([peerHigh]);
+      ticketEmbedder.embed.mockRejectedValue(new Error('network down'));
+
+      await expect(service.findSimilar(agentUser, ticket.id)).rejects.toThrow(
+        BadGatewayException,
+      );
+      await expect(service.findSimilar(agentUser, ticket.id)).rejects.toThrow(
+        'Embedding service is unavailable',
+      );
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
     });
   });
 

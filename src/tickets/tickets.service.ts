@@ -8,13 +8,16 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, Not, Repository } from 'typeorm';
+import { cosineSimilarity } from '../ai/cosine-similarity';
 import {
   TICKET_CLASSIFIER,
   type TicketClassificationResult,
   type TicketClassifier,
 } from '../ai/ticket-classifier';
+import { TICKET_EMBEDDER, type TicketEmbedder } from '../ai/ticket-embedder';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
+import { SimilarTicketsResponseDto } from './dto/similar-ticket.dto';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { CreateTicketDto } from './dto/create-ticket.dto';
@@ -43,6 +46,8 @@ const RESOLVED_STATUSES: TicketStatus[] = [
   TicketStatus.CLOSED,
 ];
 
+const SIMILAR_CANDIDATE_CAP = 50;
+
 @Injectable()
 export class TicketsService {
   constructor(
@@ -52,6 +57,8 @@ export class TicketsService {
     private readonly dataSource: DataSource,
     @Inject(TICKET_CLASSIFIER)
     private readonly ticketClassifier: TicketClassifier,
+    @Inject(TICKET_EMBEDDER)
+    private readonly ticketEmbedder: TicketEmbedder,
   ) {}
 
   async create(user: AuthUser, dto: CreateTicketDto) {
@@ -82,7 +89,7 @@ export class TicketsService {
       .createQueryBuilder('ticket')
       .leftJoinAndSelect('ticket.customer', 'customer')
       .leftJoinAndSelect('ticket.assignedAgent', 'assignedAgent')
-      .orderBy('ticket.createdAt', 'DESC')
+      .orderBy('ticket.createdAt', 'DESC');
 
     if (user.role === UserRole.CUSTOMER) {
       qb.andWhere('ticket.customerId = :userId', { userId: user.id });
@@ -154,6 +161,55 @@ export class TicketsService {
     }
   }
 
+  async findSimilar(
+    user: AuthUser,
+    id: string,
+    limit = 5,
+  ): Promise<SimilarTicketsResponseDto> {
+    const ticket = await this.findOne(user, id);
+    const candidates = await this.findSimilarCandidates(user, ticket.id);
+    if (candidates.length === 0) {
+      return { data: [] };
+    }
+
+    let vectors: number[][];
+    try {
+      vectors = await this.ticketEmbedder.embed([
+        this.toEmbeddingText(ticket),
+        ...candidates.map((candidate) => this.toEmbeddingText(candidate)),
+      ]);
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new BadGatewayException('Embedding service is unavailable');
+    }
+
+    if (vectors.length !== candidates.length + 1) {
+      throw new BadGatewayException(
+        'Embedding service returned invalid vectors',
+      );
+    }
+
+    const [sourceVector, ...candidateVectors] = vectors;
+    const ranked = candidates
+      .map((candidate, index) => ({
+        id: candidate.id,
+        ticketNumber: candidate.ticketNumber,
+        title: candidate.title,
+        status: candidate.status,
+        category: candidate.category,
+        priority: candidate.priority,
+        score: this.roundScore(
+          cosineSimilarity(sourceVector, candidateVectors[index]),
+        ),
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+
+    return { data: ranked };
+  }
+
   async update(
     user: AuthUser,
     id: string,
@@ -161,14 +217,11 @@ export class TicketsService {
   ): Promise<Ticket> {
     const ticket = await this.findOneOrFail(id);
     this.assertCustomerAccess(user, ticket);
-console.log(user,'user in update');
     if (user.role === UserRole.CUSTOMER) {
-      console.log('customer in update');
       this.assertCustomerReplaceBody(dto);
       ticket.title = dto.title;
       ticket.description = dto.description;
     } else {
-      console.log('admin in update');
       this.assertStaffReplaceBody(dto);
       await this.assertAssignableAgent(dto.assignedAgentId ?? null);
       this.applyResolvedAt(ticket, dto.status);
@@ -201,6 +254,35 @@ console.log(user,'user in update');
       throw new NotFoundException('Ticket not found');
     }
     return ticket;
+  }
+
+  private async findSimilarCandidates(
+    user: AuthUser,
+    sourceTicketId: string,
+  ): Promise<Ticket[]> {
+    const where: FindOptionsWhere<Ticket> = {
+      id: Not(sourceTicketId),
+    };
+
+    if (user.role === UserRole.CUSTOMER) {
+      where.customerId = user.id;
+    }
+
+    return this.ticketsRepository.find({
+      where,
+      order: { createdAt: 'DESC' },
+      take: SIMILAR_CANDIDATE_CAP,
+    });
+  }
+
+  private toEmbeddingText(
+    ticket: Pick<Ticket, 'title' | 'description'>,
+  ): string {
+    return `${ticket.title}\n${ticket.description}`;
+  }
+
+  private roundScore(score: number): number {
+    return Math.round(score * 10000) / 10000;
   }
 
   private assertCustomerAccess(user: AuthUser, ticket: Ticket): void {
