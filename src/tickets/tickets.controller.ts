@@ -32,7 +32,9 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateTicketDto } from './dto/create-ticket.dto';
 import { QueryTicketsDto } from './dto/query-tickets.dto';
+import { QuerySimilarTicketsDto } from './dto/query-similar-tickets.dto';
 import { SuggestClassificationDto } from './dto/suggest-classification.dto';
+import { SimilarTicketsResponseDto } from './dto/similar-ticket.dto';
 import {
   PaginatedTicketsDto,
   TicketResponseDto,
@@ -61,6 +63,24 @@ export class TicketsController {
   @ApiOkResponse({ type: PaginatedTicketsDto })
   findAll(@CurrentUser() user: AuthUser, @Query() query: QueryTicketsDto) {
     return this.ticketsService.findAll(user, query);
+  }
+
+  @Get(':id/similar')
+  @ApiOperation({
+    summary: 'Find similar tickets by meaning (not saved)',
+  })
+  @ApiOkResponse({ type: SimilarTicketsResponseDto })
+  @ApiNotFoundResponse({ description: 'Ticket not found' })
+  @ApiForbiddenResponse({ description: 'Insufficient permissions' })
+  @ApiBadGatewayResponse({
+    description: 'Embedding service is unavailable or returned invalid vectors',
+  })
+  findSimilar(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: QuerySimilarTicketsDto,
+  ) {
+    return this.ticketsService.findSimilar(user, id, query.limit ?? 5);
   }
 
   @Get(':id')
