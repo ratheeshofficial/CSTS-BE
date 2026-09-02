@@ -27,7 +27,7 @@ NestJS API for a customer support ticket system.
    | `DB_PASSWORD` | `postgres` |
    | `DB_NAME` | `csts` |
    | `DB_SYNC` | `true` |
-   | `GEMINI_API_KEY` | (required for ticket classification and similar-ticket search) |
+   | `GEMINI_API_KEY` | (required for ticket classification, similar-ticket search, and suggest-reply) |
    | `GEMINI_MODEL` | `gemini-3.6-flash` |
    | `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` |
 

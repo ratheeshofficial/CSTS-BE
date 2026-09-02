@@ -6,11 +6,13 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { TICKET_CLASSIFIER } from '../ai/ticket-classifier';
 import type { TicketClassifier } from '../ai/ticket-classifier';
 import { TICKET_EMBEDDER } from '../ai/ticket-embedder';
 import type { TicketEmbedder } from '../ai/ticket-embedder';
+import { TICKET_REPLY_SUGGESTER } from '../ai/ticket-reply-suggester';
+import type { TicketReplySuggester } from '../ai/ticket-reply-suggester';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
 import { User, UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -36,6 +38,7 @@ describe('TicketsService', () => {
   let dataSource: { query: jest.Mock };
   let ticketClassifier: jest.Mocked<Pick<TicketClassifier, 'classify'>>;
   let ticketEmbedder: jest.Mocked<Pick<TicketEmbedder, 'embed'>>;
+  let ticketReplySuggester: jest.Mocked<Pick<TicketReplySuggester, 'suggest'>>;
   let queryBuilder: {
     leftJoinAndSelect: jest.Mock;
     orderBy: jest.Mock;
@@ -126,6 +129,9 @@ describe('TicketsService', () => {
     ticketEmbedder = {
       embed: jest.fn(),
     };
+    ticketReplySuggester = {
+      suggest: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -135,6 +141,7 @@ describe('TicketsService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: TICKET_CLASSIFIER, useValue: ticketClassifier },
         { provide: TICKET_EMBEDDER, useValue: ticketEmbedder },
+        { provide: TICKET_REPLY_SUGGESTER, useValue: ticketReplySuggester },
       ],
     }).compile();
 
@@ -459,6 +466,136 @@ describe('TicketsService', () => {
         'Embedding service is unavailable',
       );
       expect(ticketsRepository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('suggestReply', () => {
+    const resolvedPeer: Ticket = {
+      ...ticket,
+      id: 'ticket-resolved',
+      ticketNumber: 'TCK-1002',
+      title: 'Double billed',
+      description: 'Two charges on my card. Refund issued.',
+      status: TicketStatus.RESOLVED,
+    };
+
+    const closedPeer: Ticket = {
+      ...ticket,
+      id: 'ticket-closed',
+      ticketNumber: 'TCK-1003',
+      title: 'App crash',
+      description: 'The app closes on login',
+      status: TicketStatus.CLOSED,
+      category: TicketCategory.TECHNICAL,
+    };
+
+    const suggestion = {
+      reply: 'Sorry about the double charge. We will refund the extra payment.',
+      usedTicketIds: [resolvedPeer.id],
+    };
+
+    it('drafts a reply from resolved peers without saving', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([closedPeer, resolvedPeer]);
+      ticketEmbedder.embed.mockResolvedValue([
+        [1, 0],
+        [0, 1],
+        [1, 0],
+      ]);
+      ticketReplySuggester.suggest.mockResolvedValue(suggestion);
+
+      const result = await service.suggestReply(agentUser, ticket.id);
+
+      const [[findCall]] = ticketsRepository.find.mock.calls as [
+        [{ where: { status?: unknown } }],
+      ];
+      expect(findCall.where.status).toEqual(
+        In([TicketStatus.RESOLVED, TicketStatus.CLOSED]),
+      );
+      expect(ticketReplySuggester.suggest).toHaveBeenCalledWith({
+        title: ticket.title,
+        description: ticket.description,
+        similarTickets: [
+          {
+            id: resolvedPeer.id,
+            title: resolvedPeer.title,
+            description: resolvedPeer.description,
+          },
+          {
+            id: closedPeer.id,
+            title: closedPeer.title,
+            description: closedPeer.description,
+          },
+        ],
+      });
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
+      expect(result).toEqual(suggestion);
+    });
+
+    it('still suggests a reply when there are no resolved peers', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([]);
+      ticketReplySuggester.suggest.mockResolvedValue({
+        reply: 'I am not sure we have seen this before. We will look into it.',
+        usedTicketIds: [],
+      });
+
+      const result = await service.suggestReply(agentUser, ticket.id);
+
+      expect(ticketEmbedder.embed).not.toHaveBeenCalled();
+      expect(ticketReplySuggester.suggest).toHaveBeenCalledWith({
+        title: ticket.title,
+        description: ticket.description,
+        similarTickets: [],
+      });
+      expect(result.usedTicketIds).toEqual([]);
+    });
+
+    it('throws NotFoundException when the ticket is missing', async () => {
+      ticketsRepository.findOne.mockResolvedValue(null);
+
+      await expect(service.suggestReply(agentUser, 'missing')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(ticketReplySuggester.suggest).not.toHaveBeenCalled();
+    });
+
+    it('throws ForbiddenException when a customer drafts another customer ticket', async () => {
+      ticketsRepository.findOne.mockResolvedValue({
+        ...ticket,
+        customerId: 'other-customer',
+      });
+
+      await expect(
+        service.suggestReply(customerUser, ticket.id),
+      ).rejects.toThrow(ForbiddenException);
+      expect(ticketReplySuggester.suggest).not.toHaveBeenCalled();
+    });
+
+    it('maps suggester failures to BadGatewayException', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([]);
+      ticketReplySuggester.suggest.mockRejectedValue(new Error('network down'));
+
+      await expect(service.suggestReply(agentUser, ticket.id)).rejects.toThrow(
+        BadGatewayException,
+      );
+      await expect(service.suggestReply(agentUser, ticket.id)).rejects.toThrow(
+        'Reply service is unavailable',
+      );
+      expect(ticketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('rethrows BadGatewayException from the suggester', async () => {
+      ticketsRepository.findOne.mockResolvedValue(ticket);
+      ticketsRepository.find.mockResolvedValue([]);
+      ticketReplySuggester.suggest.mockRejectedValue(
+        new BadGatewayException('Reply service returned invalid JSON'),
+      );
+
+      await expect(service.suggestReply(agentUser, ticket.id)).rejects.toThrow(
+        'Reply service returned invalid JSON',
+      );
     });
   });
 

@@ -8,7 +8,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindOptionsWhere, Not, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, In, Not, Repository } from 'typeorm';
 import { cosineSimilarity } from '../ai/cosine-similarity';
 import {
   TICKET_CLASSIFIER,
@@ -16,6 +16,11 @@ import {
   type TicketClassifier,
 } from '../ai/ticket-classifier';
 import { TICKET_EMBEDDER, type TicketEmbedder } from '../ai/ticket-embedder';
+import {
+  TICKET_REPLY_SUGGESTER,
+  type TicketReplySuggestResult,
+  type TicketReplySuggester,
+} from '../ai/ticket-reply-suggester';
 import type { AuthUser } from '../auth/decorators/current-user.decorator';
 import { SimilarTicketsResponseDto } from './dto/similar-ticket.dto';
 import { User, UserRole } from '../users/entities/user.entity';
@@ -47,6 +52,7 @@ const RESOLVED_STATUSES: TicketStatus[] = [
 ];
 
 const SIMILAR_CANDIDATE_CAP = 50;
+const SUGGEST_REPLY_SIMILAR_LIMIT = 3;
 
 @Injectable()
 export class TicketsService {
@@ -59,6 +65,8 @@ export class TicketsService {
     private readonly ticketClassifier: TicketClassifier,
     @Inject(TICKET_EMBEDDER)
     private readonly ticketEmbedder: TicketEmbedder,
+    @Inject(TICKET_REPLY_SUGGESTER)
+    private readonly ticketReplySuggester: TicketReplySuggester,
   ) {}
 
   async create(user: AuthUser, dto: CreateTicketDto) {
@@ -167,47 +175,49 @@ export class TicketsService {
     limit = 5,
   ): Promise<SimilarTicketsResponseDto> {
     const ticket = await this.findOne(user, id);
-    const candidates = await this.findSimilarCandidates(user, ticket.id);
-    if (candidates.length === 0) {
-      return { data: [] };
-    }
+    const ranked = await this.rankSimilarTickets(user, ticket, { limit });
 
-    let vectors: number[][];
+    return {
+      data: ranked.map((item) => ({
+        id: item.ticket.id,
+        ticketNumber: item.ticket.ticketNumber,
+        title: item.ticket.title,
+        status: item.ticket.status,
+        category: item.ticket.category,
+        priority: item.ticket.priority,
+        score: item.score,
+      })),
+    };
+  }
+
+  async suggestReply(
+    user: AuthUser,
+    id: string,
+  ): Promise<TicketReplySuggestResult> {
+    const ticket = await this.findOne(user, id);
+    const ranked = await this.rankSimilarTickets(user, ticket, {
+      statuses: RESOLVED_STATUSES,
+      limit: SUGGEST_REPLY_SIMILAR_LIMIT,
+    });
+
+    console.log('ranked', ranked);
+
     try {
-      vectors = await this.ticketEmbedder.embed([
-        this.toEmbeddingText(ticket),
-        ...candidates.map((candidate) => this.toEmbeddingText(candidate)),
-      ]);
+      return await this.ticketReplySuggester.suggest({
+        title: ticket.title,
+        description: ticket.description,
+        similarTickets: ranked.map((item) => ({
+          id: item.ticket.id,
+          title: item.ticket.title,
+          description: item.ticket.description,
+        })),
+      });
     } catch (error) {
       if (error instanceof HttpException) {
         throw error;
       }
-      throw new BadGatewayException('Embedding service is unavailable');
+      throw new BadGatewayException('Reply service is unavailable');
     }
-
-    if (vectors.length !== candidates.length + 1) {
-      throw new BadGatewayException(
-        'Embedding service returned invalid vectors',
-      );
-    }
-
-    const [sourceVector, ...candidateVectors] = vectors;
-    const ranked = candidates
-      .map((candidate, index) => ({
-        id: candidate.id,
-        ticketNumber: candidate.ticketNumber,
-        title: candidate.title,
-        status: candidate.status,
-        category: candidate.category,
-        priority: candidate.priority,
-        score: this.roundScore(
-          cosineSimilarity(sourceVector, candidateVectors[index]),
-        ),
-      }))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, limit);
-
-    return { data: ranked };
   }
 
   async update(
@@ -256,9 +266,55 @@ export class TicketsService {
     return ticket;
   }
 
+  private async rankSimilarTickets(
+    user: AuthUser,
+    ticket: Ticket,
+    options: { statuses?: TicketStatus[]; limit: number },
+  ): Promise<Array<{ ticket: Ticket; score: number }>> {
+    const candidates = await this.findSimilarCandidates(
+      user,
+      ticket.id,
+      options.statuses,
+    );
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    let vectors: number[][];
+    try {
+      vectors = await this.ticketEmbedder.embed([
+        this.toEmbeddingText(ticket),
+        ...candidates.map((candidate) => this.toEmbeddingText(candidate)),
+      ]);
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new BadGatewayException('Embedding service is unavailable');
+    }
+
+    if (vectors.length !== candidates.length + 1) {
+      throw new BadGatewayException(
+        'Embedding service returned invalid vectors',
+      );
+    }
+
+    const [sourceVector, ...candidateVectors] = vectors;
+    return candidates
+      .map((candidate, index) => ({
+        ticket: candidate,
+        score: this.roundScore(
+          cosineSimilarity(sourceVector, candidateVectors[index]),
+        ),
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, options.limit);
+  }
+
   private async findSimilarCandidates(
     user: AuthUser,
     sourceTicketId: string,
+    statuses?: TicketStatus[],
   ): Promise<Ticket[]> {
     const where: FindOptionsWhere<Ticket> = {
       id: Not(sourceTicketId),
@@ -266,6 +322,10 @@ export class TicketsService {
 
     if (user.role === UserRole.CUSTOMER) {
       where.customerId = user.id;
+    }
+
+    if (statuses?.length) {
+      where.status = In(statuses);
     }
 
     return this.ticketsRepository.find({

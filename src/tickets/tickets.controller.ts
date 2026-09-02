@@ -34,6 +34,7 @@ import { CreateTicketDto } from './dto/create-ticket.dto';
 import { QueryTicketsDto } from './dto/query-tickets.dto';
 import { QuerySimilarTicketsDto } from './dto/query-similar-tickets.dto';
 import { SuggestClassificationDto } from './dto/suggest-classification.dto';
+import { SuggestReplyDto } from './dto/suggest-reply.dto';
 import { SimilarTicketsResponseDto } from './dto/similar-ticket.dto';
 import {
   PaginatedTicketsDto,
@@ -112,6 +113,25 @@ export class TicketsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.ticketsService.suggestClassification(user, id);
+  }
+
+  @Post(':id/suggest-reply')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Suggest a customer reply from similar resolved tickets (not saved)',
+  })
+  @ApiOkResponse({ type: SuggestReplyDto })
+  @ApiNotFoundResponse({ description: 'Ticket not found' })
+  @ApiForbiddenResponse({ description: 'Insufficient permissions' })
+  @ApiBadGatewayResponse({
+    description: 'Reply service is unavailable or returned invalid JSON',
+  })
+  suggestReply(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.ticketsService.suggestReply(user, id);
   }
 
   @Put(':id')
